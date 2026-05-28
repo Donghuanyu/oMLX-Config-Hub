@@ -8,6 +8,8 @@
     - Qwen3.6-27B-UD-MLX-4bit
     - Qwen3.6-35B-A3B-4bit
     - gemma-4-26b-a4b-it-4bit
+    - Qwen3.6-27B-oQ4-mtp
+    - Qwen3.6-35B-A3B-oQ4-mtp
 
 # 4.omlx模型设置选项：
     4.1 模型类别下拉框：
