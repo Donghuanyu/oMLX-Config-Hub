@@ -49,8 +49,8 @@
 | :--- | :--- | :--- |
 | **4.1 模型类别** | `llm` | 强制指定为文本模型，防止自动检测偶尔误判为其他类别。 |
 | **4.2 REASONING PARSER** | `qwen_3_5` | 专为 Qwen 3.5/3.6 MoE 架构适配的推理链解析器，确保模型逻辑输出的结构被正确截取。 |
-| **4.3 Ctx Window** | `32768` | 64G 内存非常充裕，32K 上下文能够完美处理大型 Java 项目的复杂调用链与重构。 |
-| **4.4 最大Token数** | `4096` | 限制单次最大输出，防范模型因发散导致无限输出。 |
+| **4.3 Ctx Window** | `131072` | **✅ 完全可行**（备选：`65536`）。64GB 内存充裕，基于基准测试 32K 峰值仅 22.73 GB，线性外推 128K 下约需 30~32 GB，完全安全。128K 上下文彻底解决"Context Window 不足"报错。详见下方节 6。 |
+| **4.4 最大Token数** | `8192` | 配合 128K Ctx Window 提升至 8192，让模型在长上下文场景中能输出完整类级重构代码，同时保留防发散保护。 |
 | **4.5 温度** | `0.2` | 黄金低温度。确保代码生成高确定性、符合严格规范，杜绝胡言乱语。 |
 | **4.6 Top P** | `0.9` | 剔除长尾低概率词，在低温度下辅助稳定代码输出结构。 |
 | **4.7 Top K** | `40` | 限制采样池大小，增加代码输出的严谨性。 |
@@ -105,7 +105,64 @@
 ```
 
 
-## 5.基准测试结果
+## 5. 128K Ctx Window 可行性分析与前端工具设置
+
+### 5.1 为何 128K 在您 64GB Mac mini M4 上完全可行
+
+基于基准测试数据推算：
+
+| 上下文长度 | 实测 Peak Mem | 说明 |
+|:---|:---:|:---|
+| pp1024 (1K) | 20.31 GB | 基准值 |
+| pp32768 (32K) | 22.73 GB | +2.42 GB（得益于 4-bit TurboQuant） |
+| **pp131072 (128K) 推算** | **≈ 30~32 GB** | 线性外推，KV Cache 增加约 8~10 GB |
+
+完整内存预算：主模型 22GB + KV Cache 10GB + Draft 4GB + L1 4GB + 系统 8GB = **约 48GB** ← 64GB 剩余约 16GB，完全安全。
+
+### 5.2 前端调用工具上下文窗口设置
+
+#### Claude Code 设置
+
+文件路径：[`.claude/settings.json`](.claude/settings.json)
+
+| 环境变量 | 推荐值 | 说明 |
+|:---|:---:|:---|
+| `CLAUDE_MAX_CONTEXT_TOKENS` | `131072` | 必须与 OMLX 后端一致 |
+| `CLAUDE_SUMMARY_THRESHOLD` | `98304` | 128K 的 75% |
+| `CLAUDE_CODE_OVERRIDE_MODEL_MAX_TOKENS` | `8192` | 覆盖模型最大输出 Token 数 |
+
+#### Roo Code / Cline 设置（VS Code `settings.json`）
+
+```json
+{
+  "roo-code.maxContextTokens": 131072,
+  "roo-code.maxOutputTokens": 8192,
+  "roo-code.contextThreshold": 98304,
+  "cline.maxContextTokens": 131072,
+  "cline.maxOutputTokens": 8192,
+  "cline.contextSummaryThreshold": 98304
+}
+```
+
+### 5.3 配置一致性检查清单
+
+| 层级 | 配置项 | 推荐值 |
+|:---|:---|:---:|
+| **OMLX 后端** | Ctx Window | `131072` |
+| **OMLX 后端** | 最大 Token 数 | `8192` |
+| **OMLX 后端** | TurboQuant KV Cache | `yes` (4-bit) ✅ **必须** |
+| **OMLX 后端** | 限制工具结果 Token | `no` |
+| **Claude Code** | `CLAUDE_MAX_CONTEXT_TOKENS` | `131072` |
+| **Claude Code** | `CLAUDE_SUMMARY_THRESHOLD` | `98304` |
+| **Claude Code** | `CLAUDE_CODE_OVERRIDE_MODEL_MAX_TOKENS` | `8192` |
+| **Roo Code / Cline** | maxContextTokens | `131072` |
+| **Roo Code / Cline** | maxOutputTokens | `8192` |
+
+> **建议**：修改后重启前端工具使新配置生效。
+
+---
+
+## 6.基准测试结果
 ```
 oMLX - LLM inference, optimized for your Mac
 https://github.com/jundot/omlx

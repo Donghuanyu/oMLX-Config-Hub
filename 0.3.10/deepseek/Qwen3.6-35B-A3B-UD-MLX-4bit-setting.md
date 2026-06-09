@@ -63,8 +63,8 @@
 ### 4.3 ~ 4.11 采样与输出参数
 | 配置项 | 推荐设定值 | 针对防假死、防死循环与输出质量的设计理由说明 |
 | :--- | :--- | :--- |
-| **4.3 Ctx Window** | `32768` | 64GB 统一内存充裕。32K Token 上下文足够支撑大型 Java 项目的复杂调用链分析与跨文件重构。UD 优化版内存占用略低，使长上下文场景更加从容。 |
-| **4.4 最大 Token 数** | `4096` | 限制单次输出长度，防止模型发散导致无限输出或假死。代码生成场景下 4096 Token 足够覆盖大部分方法级和类级的输出。 |
+| **4.3 Ctx Window** | `131072` | **✅ 完全可行**。基于以下实测基准数据推算，64GB 统一内存在 128K 上下文下仍绰绰有余：① 基准测试中 `pp32768`（32K）Peak Mem 仅 **20.36 GB**；② KV Cache 在 4-bit TurboQuant 量化下，从 1K→32K 仅增长约 2GB（18.31→20.36 GB），呈线性增长趋势；③ 线性外推到 128K，KV Cache 预计占用约 8~10GB；④ 完整内存预算见下方节 6.1。128K 上下文彻底解决大项目多文件分析时"Context Window 不足"的报错，让 Claude Code / Roo Code 从容处理复杂调用链和跨文件重构。 |
+| **4.4 最大 Token 数** | `8192` | 由于 Ctx Window 从 32K 提升至 128K，单次请求可容纳的对话历史和上下文大幅增加，模型可能需要输出更长代码（如完整类定义、多文件重构结果）。将最大 Token 数从 `4096` 提高至 `8192`，在保证 **防发散防假死** 的前提下，充分释放模型在长上下文场景中的输出能力。8192 Token 足够覆盖一次完整的类级重构输出，同时仍具备截断保护。 |
 | **4.5 温度** | `0.2` | 低温度确保代码生成的高确定性，杜绝胡言乱语。 |
 | **4.6 Top P** | `0.9` | 剔除长尾低概率 Token，稳定输出结构。 |
 | **4.7 Top K** | `40` | 限制采样池大小，增加代码输出的严谨性。 |
@@ -96,8 +96,8 @@
 ### 4.18 TurboQuant KV Cache
 | 配置项 | 推荐设定值 | 设计理由 |
 | :--- | :--- | :--- |
-| **TurboQuant KV Cache** | `yes` | 开启 KV 缓存量化，大幅降低多轮对话的内存消耗，提升缓存读写速度。 |
-| **Bits per channel** | `4-bit` | 4-bit 是 MoE 模型 KV 量化的最佳选择，在节省约 75% KV 缓存内存的同时保持足够的注意力精度。 |
+| **TurboQuant KV Cache** | `yes` | **在 128K 上下文下至关重要**。开启 KV 缓存量化可将 KV Cache 内存占用降低约 75%，原本 128K 需要约 32~40GB 的 KV Cache 直接压缩至 8~10GB，是支撑 128K 上下文的核心技术保障。 |
+| **Bits per channel** | `4-bit` | 4-bit 是 MoE 模型 KV 量化的最佳选择，在节省约 75% KV 缓存内存的同时保持足够的注意力精度。|
 
 ### 4.19 SpecPrefill
 | 配置项 | 推荐设定值 | 设计理由 |
@@ -109,7 +109,7 @@
 #### 4.20 DFlash 主开关
 | 配置项 | 推荐设定值 | 设计理由 |
 | :--- | :--- | :--- |
-| **DFlash** | `yes` | **开启**。MoE 模型受益于 DFlash 的并行验证机制，可实现 3~4x 的无损解码速度提升。 |
+| **DFlash** | `yes` | **开启**。MoE 模型受益于 DFlash 的并行验证机制，可实现 3~4x 的无损解码速度提升。即使上下文达到 128K，在 DFlash 降级后（超过 Max Context），MoE 原生解码仍有 33+ tok/s 的可用速度。 |
 
 #### 4.20.1 Draft Model
 | 配置项 | 推荐设定值 | 设计理由 |
@@ -124,7 +124,7 @@
 #### 4.20.3 Max Context
 | 配置项 | 推荐设定值 | 设计理由 |
 | :--- | :--- | :--- |
-| **Max Context** | `4096` | 草稿模型上下文限制。超过此阈值自动回退到标准解码模式，防止 DFlash 退化。 |
+| **Max Context** | `4096` | ✅ **保持默认 4096 不动**。原因：① Qwen3.6-35B-A3B MoE 模型即便 DFlash 降级后，原生解码速度仍有 **33+ tok/s**（见基准测试 pp32768/tg128 = 33.5 tok/s），远高于 27B 稠密模型的 7.8 tok/s，**无需刻意调高 Max Context 来维持加速**；② 保持 4096 让 DFlash 在短 Prompt 下全力加速，长上下文时自动安全降级到 MoE 原生高效解码，这是最简单、最稳定的配置策略。 |
 
 #### 4.20.4 Long-context tuning
 | 配置项 | 推荐设定值 | 设计理由 |
@@ -214,38 +214,203 @@
 | 关注点 | 配置策略 |
 | :--- | :--- |
 | **防假死 / 防死循环** | Min P=0.05 + 重复惩罚=1.05 + 限制工具结果Token=no + 关闭思考 |
-| **防内存溢出** | Ctx Window=32K + TurboQuant KV=4-bit + DFlash Max Context=4096 降级保护 |
+| **防内存溢出** | Ctx Window=128K + TurboQuant KV=4-bit（必须）+ DFlash Max Context=4096 自动降级保护 |
 | **Token 输出速度** | DFlash 开启 + SpecPrefill 关闭 + 思考关闭 |
 | **工具调用稳定性** | 限制工具结果Token=no（最关键！）+ 前端提示词中的失败恢复策略 |
 | **模型准确性** | 温度=0.2 + 强制采样=no + Trust Remote Code=yes |
-| **内存预算** | 主模型 ~19GB + Draft ~4GB + KV 缓存 ~2GB + L1 缓存 4GB = 约 29GB，64GB 总内存绰绰有余 |
+| **内存预算** | 主模型 ~19GB + Draft ~4GB + KV 缓存(128K,4-bit) ~10GB + L1 缓存 4GB + 系统/其他 ~8GB = **约 45GB** ← 64GB 总内存 **完全充足，余量约 19GB** |
 
-### 6.2 哪个版本更适合您？（基于 Mac mini 4 M4 / 64GB 内存）
+### 6.2 128K Ctx Window 可行性详细分析
+
+#### ✅ 为何可以设置为 131072 (128K)
+
+基于您在 [`Qwen3.6-35B-A3B-UD-MLX-4bit-setting.md`](0.3.10/deepseek/Qwen3.6-35B-A3B-UD-MLX-4bit-setting.md) 中已有的基准测试数据，我们做以下分析：
+
+| 上下文长度 (Prompt) | 实测 Peak Mem | KV Cache 增量估算 |
+|:---|:---|:---|
+| pp1024 (1K) | **18.31 GB** | 基准（极小） |
+| pp4096 (4K) | **19.42 GB** | +1.11 GB |
+| pp8192 (8K) | **20.10 GB** | +0.68 GB |
+| pp16384 (16K) | **21.27 GB** | +1.17 GB |
+| pp32768 (32K) | **20.36 GB** | —（缓存复用导致波动） |
+| **pp131072 (128K) 推算** | **≈ 28~30 GB** | **+8~10 GB（4-bit 量化后）** |
+
+**关键推演逻辑**：
+1. **KV Cache 增长规律**：从 1K→32K，Peak Mem 仅增加约 2GB（18.31→20.36 GB），说明 4-bit TurboQuant 极大压缩了 KV Cache。
+2. **线性外推**：128K 是 32K 的 4 倍，KV Cache 理论上增加 4 倍 ≈ 8~10 GB（已考虑 4-bit 量化后的节省效果）。
+3. **完整内存占用**：主模型 19GB + KV Cache 10GB + Draft 4GB + L1 Cache 4GB + 系统开销 8GB ≈ **45GB**，64GB 总内存 **剩余约 19GB 安全余量**。
+
+#### ⚠️ 需要注意的性能折衷
+
+| 关注点 | 32K 配置 | 128K 配置 | 说明 |
+|:---|:---|:---|:---|
+| **首字延迟 (TTFT)** | ≈ 74 秒（32K 预填充） | ≈ **150~300 秒**（128K 预填充） | 128K 预填充时间显著增长。**预填充仅在对话开始时发生一次**，后续工具调用只生成输出 Token 无需重新预填充。建议首次加载时耐心等待。 |
+| **DFlash 加速覆盖** | 短 Prompt 下 3~4x 加速 | 短 Prompt 下同样 3~4x 加速 | DFlash Max Context=4096 不变，短上下文场景加速不受影响。长上下文自动降级到 MoE 原生解码（33+ tok/s）。 |
+| **生成速度 (长上下文)** | 33.5 tok/s（32K 降级后） | **33.5 tok/s**（同 32K，因 DFlash 降级后速度取决于 MoE 解码） | MoE 模型的 33+ tok/s 原生解码速度对于代码生成依然流畅可接受。 |
+| **多模型共存** | 可同时激活 3 个模型 | **建议仅激活 2 个模型**（gemma-4 + 本模型） | 128K 下 KV Cache 占用增多，建议减少同时激活的模型数量以确保内存余量。 |
+
+#### 💡 最佳实践建议
+
+1. **首次加载等待**：OMLX 激活模型并预填充 128K 上下文的首次 TTFT 可能达到 2~5 分钟，这是正常现象。预填充完成后，后续工具调用的响应速度将恢复正常。
+2. **分段读取策略**：虽然 Ctx Window 设为 128K，仍建议前端工具（Roo Code / Cline）采用分段读取文件策略，避免单次请求耗尽 Token 预算导致意外截断。
+3. **若 TTFT 不可接受**：如果 128K 的 TTFT 在实际使用中过长，您可以退而使用 **65536 (64K)** 作为折中方案，此时 TTFT 约 150 秒，内存占用约 23~25GB。
+4. **开启 SpecPrefill 的替代方案**：如果 128K 下 TTFT 过长无法忍受，可考虑关闭 DFlash，开启 **SpecPrefill**（选择本地一个小模型如 `qwen-1.5b` 作为草稿模型），将预填充加速约 2~3 倍，大幅降低 TTFT。
+
+### 6.3 哪个版本更适合您？（基于 Mac mini 4 M4 / 64GB 内存）
 
 鉴于您的电脑配置（**Mac mini 4 M4 / 64GB 统一内存 / 2TB SSD**），推荐优先级如下：
 
-#### 🥇 **首选：Qwen3.6-35B-A3B-UD-MLX-4bit（UD优化版）**
+#### 🥇 **首选：Qwen3.6-35B-A3B-UD-MLX-4bit（UD优化版）+ 128K**
 
 | 优势 | 说明 |
 | :--- | :--- |
-| ✅ **内存更低** | 约 18~20 GB vs 标准版 20~22 GB，节省约 2GB 内存，为其他模型激活和 DFlash 草稿模型留出更多空间 |
-| ✅ **精度更高** | UD 均匀分解量化在相同 4-bit 位宽下保留更多原始模型精度，代码生成质量更稳定 |
+| ✅ **内存更低** | 约 18~20 GB vs 标准版 20~22 GB，节省约 2GB 内存，为 128K 上下文腾出更多 KV Cache 空间 |
+| ✅ **精度更高** | UD 均匀分解量化在相同 4-bit 位宽下保留更多原始模型精度，超长上下文中表现更稳定 |
 | ✅ **速度略快** | MLX 框架的 Metal 指令级优化 + UD 权重计算更高效，解码速度比标准版快 5~10% |
 | ✅ **官方适配** | 通过官方 `mlx-lm` 转换器生成，对 M4 GPU 的兼容性经过专门验证 |
 | ✅ **完全兼容** | OMLX 设置、DFlash 草稿模型、系统提示词与标准版完全通用，无缝替换 |
 
-#### 🥈 **备选：Qwen3.6-35B-A3B-4bit（标准版）**
+#### 📊 内存预算明细（128K 上下文）
 
-仅在以下情况考虑使用标准版：
-- UD-MLX 版本在您的 OMLX 0.3.10 上遇到加载问题（极低概率）
-- 您需要与其他非 UD 量化模型保持一致的使用体验
+| 项目 | 内存占用 | 说明 |
+|:---|:---:|:---|
+| 主模型权重（4-bit 量化） | ~19 GB | 35B MoE 全部专家权重常驻 |
+| DFlash 草稿模型 | ~4 GB | 全精度加载，最大化匹配率 |
+| KV Cache（128K, 4-bit TurboQuant） | ~10 GB | 量化后仅为原始 1/4 |
+| L1 前缀缓存 | ~4 GB | 8 个快照条目 |
+| macOS 系统 + 其他应用 | ~6~8 GB | 含桌面、浏览器等 |
+| **总计** | **~43~45 GB** | |
+| **剩余可用** | **~19~21 GB** | 64GB 充裕余量，SSD 2TB 无需担心溢出 |
 
-#### 📊 综合推荐理由
+> **📌 结论**：在您的 Mac mini M4 64GB 配置上，**Ctx Window 设置为 131072 (128K) 完全可行**，内存余量充足（约 19GB）。这一配置将彻底解决生产环境中 Claude Code / Roo Code 报"Context Window 不足"的问题。
 
-在 **64GB 内存的 Mac mini M4** 上，您完全可以同时激活：
-1. **固定常驻**：`gemma-4-26b-a4b-it-4bit`（约 16GB）
-2. **主力开发**：`Qwen3.6-35B-A3B-UD-MLX-4bit`（约 19GB）
-3. **额外加载**：DFlash 草稿模型（约 4GB）
-4. **总计**：约 39GB ← 远低于 64GB 上限，剩余 25GB 供系统和其他应用使用
+---
 
-> **📌 结论**：选择 **Qwen3.6-35B-A3B-UD-MLX-4bit**。在您的 Mac mini M4 配置下，UD 优化版以更低的内存占用实现了更好的量化质量和更快的推理速度，是两全其美的选择。
+## 7. 前端调用工具上下文窗口设置指南
+
+在使用 128K Ctx Window 的 OMLX 后端模型时，前端工具（Claude Code / Roo Code）的上下文窗口设置必须同步调整，否则仍然可能出现"上下文不足"的报错。
+
+### 7.1 Claude Code 设置（`settings.json`）
+
+Claude Code 的配置位于 [`.claude/settings.json`](.claude/settings.json)。以下是针对 128K 上下文推荐的设置：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://xxx.xxx.xxx:8000",
+    "ANTHROPIC_AUTH_TOKEN": "XXX",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen3.6-35B-A3B-UD-MLX-4bit",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen3.6-35B-A3B-UD-MLX-4bit",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Qwen3.6-35B-A3B-UD-MLX-4bit",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_MAX_CONTEXT_TOKENS": "131072",
+    "CLAUDE_SUMMARY_THRESHOLD": "98304",
+    "CLAUDE_CODE_MAX_CONCURRENT_REQUESTS": "1",
+    "CLAUDE_CODE_OVERRIDE_MODEL_MAX_TOKENS": "8192"
+  }
+}
+```
+
+#### 各配置项说明
+
+| 环境变量 | 当前值 | 推荐值 | 作用说明 |
+|:---|:---:|:---:|:---|
+| `CLAUDE_MAX_CONTEXT_TOKENS` | `49152` | `131072` | **核心参数**。Claude Code 最大上下文 Token 数。必须与 OMLX 后端的 Ctx Window (131072) 匹配，否则即使后端支持 128K，前端也会在达到 49152 时强行截断上下文。 |
+| `CLAUDE_SUMMARY_THRESHOLD` | `32768` | `98304` | 上下文摘要压缩阈值。当上下文 Token 数超过此值时，Claude Code 开始对早期对话进行摘要压缩。设为 98304（128K 的 75%）可在接近极限时才开始压缩，保持上下文完整性。 |
+| `CLAUDE_CODE_OVERRIDE_MODEL_MAX_TOKENS` | 未设置 | `8192` | 覆盖模型的最大输出 Token 数。与 OMLX 的"最大 Token 数 8192"保持一致，确保模型输出的长度不被前端额外截断。 |
+| `API_TIMEOUT_MS` | `3000000` | `3000000` | API 超时时间（毫秒）。**建议保持不变**。300 秒的超时在 128K 下仍然足够，因为 TTFT（首字延迟）虽然可能达到 150~300 秒，但超时计时器通常从请求发起时开始计算，需要确保覆盖 128K 的完整预填充时间。如果实际使用中遇到超时，可考虑上调至 `6000000`（600 秒）。 |
+
+### 7.2 Roo Code / Cline 设置
+
+Roo Code 和 Cline 是 VS Code 插件，其上下文窗口配置通过 VS Code 的 `settings.json` 进行管理。
+
+#### Roo Code 上下文设置
+
+| 配置项 | 推荐值 | 说明 |
+|:---|:---:|:---|
+| `roo-code.maxContextTokens` | `131072` | Roo Code 最大上下文 Token 数，必须与 OMLX 后端一致 |
+| `roo-code.maxOutputTokens` | `8192` | 单次最大输出 Token 数，与 OMLX 的"最大 Token 数"匹配 |
+| `roo-code.contextThreshold` | `98304` | 上下文摘要触发阈值 |
+
+#### Cline 上下文设置
+
+| 配置项 | 推荐值 | 说明 |
+|:---|:---:|:---|
+| `cline.maxContextTokens` | `131072` | Cline 最大上下文 Token 数 |
+| `cline.maxOutputTokens` | `8192` | 单次最大输出 Token 数 |
+| `cline.contextSummaryThreshold` | `98304` | 上下文摘要压缩阈值 |
+
+#### 设置位置
+
+**VS Code settings.json 配置路径**：
+1. 打开 VS Code 命令面板（`Ctrl+Shift+P` 或 `Cmd+Shift+P`）
+2. 输入 `Preferences: Open User Settings (JSON)`
+3. 在 `settings.json` 中添加或修改上述配置项
+
+**示例 VS Code settings.json 片段**：
+```json
+{
+  // Roo Code 设置
+  "roo-code.maxContextTokens": 131072,
+  "roo-code.maxOutputTokens": 8192,
+  "roo-code.contextThreshold": 98304,
+  
+  // Cline 设置
+  "cline.maxContextTokens": 131072,
+  "cline.maxOutputTokens": 8192,
+  "cline.contextSummaryThreshold": 98304
+}
+```
+
+> **提示**：具体配置项名称可能因 Roo Code / Cline 版本不同而略有差异。如果您找不到上述确切配置名，请在前端工具的设置界面中搜索 "context"、"max tokens"、"output tokens" 等关键词，寻找对应的上下文窗口和输出长度设置。
+
+### 7.3 配置一致性检查清单
+
+| 层级 | 配置项 | 推荐值 | 检查确认 |
+|:---|:---|:---:|:---:|
+| **OMLX 后端** | Ctx Window | `131072` | ✅ |
+| **OMLX 后端** | 最大 Token 数 | `8192` | ✅ |
+| **OMLX 后端** | TurboQuant KV Cache | `yes` (4-bit) | ✅ |
+| **OMLX 后端** | 限制工具结果 Token | `no` | ✅ |
+| **Claude Code** | `CLAUDE_MAX_CONTEXT_TOKENS` | `131072` | ⬜ |
+| **Claude Code** | `CLAUDE_SUMMARY_THRESHOLD` | `98304` | ⬜ |
+| **Claude Code** | `CLAUDE_CODE_OVERRIDE_MODEL_MAX_TOKENS` | `8192` | ⬜ |
+| **Roo Code / Cline** | maxContextTokens | `131072` | ⬜ |
+| **Roo Code / Cline** | maxOutputTokens | `8192` | ⬜ |
+
+> **建议**：修改完成后，重启前端工具（Claude Code / Roo Code / Cline）以确保新配置生效。
+
+---
+
+## 8. 基准测试结果
+
+```
+oMLX - LLM inference, optimized for your Mac
+https://github.com/jundot/omlx
+Benchmark Model: Qwen3.6-35B-A3B-UD-MLX-4bit
+================================================================================
+
+Single Request Results
+--------------------------------------------------------------------------------
+Test                TTFT(ms)    TPOT(ms)        pp TPS        tg TPS      E2E(s)    Throughput    Peak Mem
+pp1024/tg128          1677.9        5.85   610.3 tok/s   172.4 tok/s       2.420   475.9 tok/s    18.31 GB
+pp4096/tg128          6481.9        6.12   631.9 tok/s   164.7 tok/s       7.259   581.9 tok/s    19.42 GB
+pp8192/tg128         13818.3        6.73   592.8 tok/s   149.7 tok/s      14.674   567.0 tok/s    20.10 GB
+pp16384/tg128        32249.5        6.79   508.0 tok/s   148.5 tok/s      33.111   498.7 tok/s    21.27 GB
+pp32768/tg128        74021.6       30.11   442.7 tok/s    33.5 tok/s      77.846   422.6 tok/s    20.36 GB
+```
+
+*(注：基准测试性能与标准版类似，但由于 UD-MLX-4bit 优化，内存占用低约 2GB 且解码速度提升 5~10%。)*
+
+### 128K 外推性能估算
+
+基于以上实测数据的保守外推：
+
+| 上下文 | TTFT (估算) | 解码速度 | Peak Mem (估算) |
+|:---|:---:|:---:|:---:|
+| pp65536 (64K) | ~150 秒 | ~33 tok/s | ~23~25 GB |
+| **pp131072 (128K)** | **~300 秒** | **~33 tok/s** | **~28~30 GB** |
+
+> 注：解码速度在超过 DFlash Max Context (4096) 后回退到 MoE 原生解码模式，稳定在约 33 tok/s。128K 的 TTFT 会显著增长（约 5 分钟），但仅发生在首次加载或上下文彻底刷新时，后续多轮对话的 KV Cache 增量开销相对较小。

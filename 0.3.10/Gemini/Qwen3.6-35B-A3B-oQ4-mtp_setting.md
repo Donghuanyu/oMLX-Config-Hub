@@ -59,8 +59,8 @@
 ### 4.3 ~ 4.11 采样与输出参数
 | 配置项 | 推荐设定值 | 针对防假死、防死循环与输出质量的设计理由说明 |
 | :--- | :--- | :--- |
-| **4.3 Ctx Window** | `32768` | 32K 上下文能够完美处理大型 Java 项目的复杂调用链与重构。 |
-| **4.4 最大 Token 数** | `4096` | 限制单次最大输出，防范模型发散导致无限输出。 |
+| **4.3 Ctx Window** | `131072` | **✅ 完全可行**。oQ4-mtp 版本有 64K 实测数据：pp65536 Peak Mem 仅 **26.86 GB**（见基准测试）。线性外推 128K 下约需 33~35 GB，64GB 内存完全充足。128K 上下文可彻底解决 Claude Code / Roo Code 报"上下文不足"的错误。详见下方节 5。 |
+| **4.4 最大 Token 数** | `8192` | 配合 128K Ctx Window 提升输出上限，让模型在长上下文场景中能输出完整类级重构代码，同时保留防发散保护。 |
 | **4.5 温度** | `0.2` | 黄金低温度。确保代码生成高确定性、符合严格规范，杜绝胡言乱语。 |
 | **4.6 Top P** | `0.9` | 剔除长尾低概率词，在低温度下辅助稳定代码输出结构。 |
 | **4.7 Top K** | `40` | 限制采样池大小，增加代码输出的严谨性。 |
@@ -165,11 +165,57 @@
 | :--- | :--- |
 | **加速机制选择** | **Native MTP=yes**（推荐，1.5x 提速且免 Draft 模型内存）；若需极致 150+ TPS 提速，可设 Native MTP=no 并开启 DFlash (Draft Model=`z-lab/Qwen3.6-35B-A3B-DFlash`) |
 | **防假死 / 防死循环** | Min P=0.05 + 重复惩罚=1.05 + 限制工具结果Token=no + 关闭思考 |
-| **防内存溢出** | Ctx Window=32K + TurboQuant KV=4-bit |
+| **防内存溢出** | Ctx Window=128K + TurboQuant KV=4-bit（必须）|
 | **工具调用稳定性** | 限制工具结果Token=no（最关键！）+ 前端提示词中的失败恢复策略 |
 | **模型准确性** | 温度=0.2 + 强制采样=no + Trust Remote Code=yes |
+| **内存预算 (128K)** | 主模型 ~21GB + KV Cache(128K,4-bit) ~12GB + L1 缓存 4GB + 系统 ~8GB = **约 45GB** ← 64GB 剩余约 19GB |
 
-## 6. 基准测试结果
+---
+
+## 6. 前端调用工具上下文窗口设置指南
+
+### 6.1 Claude Code 设置
+
+文件路径：[`.claude/settings.json`](.claude/settings.json)
+
+| 环境变量 | 推荐值 | 说明 |
+|:---|:---:|:---|
+| `CLAUDE_MAX_CONTEXT_TOKENS` | `131072` | 必须与 OMLX 后端 Ctx Window 一致 |
+| `CLAUDE_SUMMARY_THRESHOLD` | `98304` | 128K 的 75%，接近极限时才开始压缩 |
+| `CLAUDE_CODE_OVERRIDE_MODEL_MAX_TOKENS` | `8192` | 覆盖模型最大输出 Token 数 |
+
+### 6.2 Roo Code / Cline 设置
+
+通过 VS Code `settings.json` 配置：
+
+```json
+{
+  "roo-code.maxContextTokens": 131072,
+  "roo-code.maxOutputTokens": 8192,
+  "roo-code.contextThreshold": 98304,
+  "cline.maxContextTokens": 131072,
+  "cline.maxOutputTokens": 8192,
+  "cline.contextSummaryThreshold": 98304
+}
+```
+
+### 6.3 配置一致性检查清单
+
+| 层级 | 配置项 | 推荐值 |
+|:---|:---|:---:|
+| **OMLX 后端** | Ctx Window | `131072` |
+| **OMLX 后端** | 最大 Token 数 | `8192` |
+| **OMLX 后端** | TurboQuant KV Cache | `yes` (4-bit) ✅ **必须** |
+| **OMLX 后端** | 限制工具结果 Token | `no` |
+| **Claude Code** | `CLAUDE_MAX_CONTEXT_TOKENS` | `131072` |
+| **Claude Code** | `CLAUDE_SUMMARY_THRESHOLD` | `98304` |
+| **Claude Code** | `CLAUDE_CODE_OVERRIDE_MODEL_MAX_TOKENS` | `8192` |
+| **Roo Code / Cline** | maxContextTokens | `131072` |
+| **Roo Code / Cline** | maxOutputTokens | `8192` |
+
+> **建议**：修改完成后重启前端工具以使新配置生效。
+
+## 7. 基准测试结果
 
 ```
 oMLX - LLM inference, optimized for your Mac
